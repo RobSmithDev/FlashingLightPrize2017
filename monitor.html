@@ -1,0 +1,200 @@
+<!-- sorry, no comments, just hacky - @RobSmithDev - Flashing Light Prize 2017 -->
+<html width="100%" height="100%">
+<head>
+<style>
+body, html {
+	background-color: #000000;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+	border:0;
+	padding:0;
+	margin:0;
+	font-family: arial;
+	font-size: 9pt;	
+}
+</style>
+</head>
+<body>
+<div style="color: #C0C0C0; text-align: center">The code behind this is just looking at the waveform data.  There is enough here ot actually do beat detection, but then what would be the point in the OpAmp circuit...!</div>
+<canvas width="1024" height="768" style="position: absolute; z-index: 2; left: 0; top: 0" id="spectrum"></canvas>
+<canvas width="1024" height="768" style="position: absolute; z-index: 3; left: 0; top: 0" id="waveform"></canvas>
+<input type="range" min="0" max="400" id="threshold" value="40" style="position: absolute; z-index: 4; left: 340px; bottom: 5px; width: 100%" ></input>
+<div id="indicator" style="width: 100px; height: 40px; bottom: 0; position: absolute; z-index: 5; border: 1px solid #FFFFFF; text-align: center; line-height: 40px; color: #FFFFFF" onclick="signalTrigger()" >Input</div>
+<div id="bpm" style="width: 100px; height: 40px; bottom: 0; left: 120px; position: absolute; z-index: 5; border: 1px solid #FFFFFF; background-color: #004000; color: #FFFFFF; text-align: center; line-height: 40px" ></div>
+<div id="simulated" style="width: 100px; height: 40px; bottom: 0; left: 230px; position: absolute; z-index: 5; border: 1px solid #FFFFFF; background-color: #000040; color: #FFFFFF; text-align: center; line-height: 40px" >Synthesised</div>
+<script>
+
+var lastCall = 0;
+var lastWasTrigger = false;   
+var lastAverages = [];
+var averagesIndex = 0;
+var lastPulse = 0;
+var averagePulseTime = 10000;
+var simulatedTriggered = false;
+var timerID = 0;
+var deadCounter=0;
+
+var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+var p = navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+var analyser = audioCtx.createAnalyser(); analyser.fftSize = 1024;
+var isDetected = false; 
+var lastWaveform = []; 
+
+var frequencyData = new Uint8Array(analyser.frequencyBinCount);
+var waveformData;
+
+document.getElementById("spectrum").style.width = document.body.clientWidth; 
+document.getElementById("spectrum").style.height = document.body.clientHeight; 
+document.getElementById("waveform").style.width = document.body.clientWidth; 
+document.getElementById("waveform").style.height = document.body.clientHeight; 
+document.getElementById("threshold").style.width = document.body.clientWidth - 350;
+
+var transmitter = new WebSocket("ws://192.168.0.2:500/");
+
+// Output
+function flashLight(force) {
+	if (!simulatedTriggered) {
+		deadCounter++;
+		//if (deadCounter>40) averagePulseTime=10000;
+		simulatedTriggered = true;
+		document.getElementById("simulated").style.backgroundColor = "#0000FF";
+		timerID = setTimeout(function() {document.getElementById("simulated").style.backgroundColor = "#000040";simulatedTriggered=false;},averagePulseTime/3);
+		if (transmitter) transmitter.send("BEAT");
+	} else 
+	if (force) {
+		deadCounter=0;
+		if (timerID>0) clearTimeout(timerID);
+		simulatedTriggered = true;
+		document.getElementById("simulated").style.backgroundColor = "#0000FF";
+		timerID = setTimeout(function() {document.getElementById("simulated").style.backgroundColor = "#000040";simulatedTriggered=false;},averagePulseTime/3);
+		if ((transmitter) && (!simulatedTriggered)) transmitter.send("BEAT");
+	}
+}
+
+// simulated
+function handleSimulated() {
+	var d = new Date();
+	var n = d.getTime();
+	var tim = Math.abs(n-lastPulse);
+	if (tim>averagePulseTime) {
+		lastPulse = n;
+		flashLight(false);
+	}
+}
+   
+// Trigger
+function signalTrigger(force) {
+	var d = new Date();
+	var n = d.getTime();
+
+	var change = n - lastCall;
+	lastCall = n;
+		
+	// Too fast (>200bpm), ignore
+	if (change<300) return;
+	
+	// Too slow
+	if (change>1500) return;
+	
+	lastPulse = n;
+	
+	if (lastAverages.length<10) {
+		lastAverages[lastAverages.length] = change;
+		return;
+	}
+	
+	lastAverages[averagesIndex++] = change;
+	if (averagesIndex>=lastAverages.length) averagesIndex=0;
+	
+	// Work out BPM
+	var total = 0;
+	for (var a=0; a<lastAverages.length; a++) {
+		total += lastAverages[a];
+	}
+	total/=(lastAverages.length+0.0);
+	flashLight(force);
+	averagePulseTime = total;
+	
+	var element = document.getElementById("bpm");
+	element.innerHTML = ((60000/total)|0)+" BPM";
+}
+   
+// Render   
+function renderFrame() {
+	var canvas = document.getElementById("waveform");
+	var bitmap = canvas.getContext('2d');
+	
+	handleSimulated();
+	
+	bitmap.clearRect(0,0,1024,768);
+	var trigger = false;
+	var pos = parseInt(document.getElementById("threshold").value);
+	
+	if ((waveformData) && (waveformData.length>=256)) {
+		bitmap.beginPath();
+		bitmap.moveTo(-2,384-pos);
+		bitmap.lineTo(1024,384-pos);
+		bitmap.moveTo(-2,384+pos);
+		bitmap.lineTo(1024,384+pos);
+		bitmap.lineWidth = 1;
+		bitmap.strokeStyle = '#0000FF';
+		bitmap.stroke();
+		bitmap.closePath();
+		bitmap.beginPath();
+		bitmap.moveTo(-2,384);
+		var width = parseInt(1024/waveformData.length);
+		for (var a=0; a<waveformData.length; a++) {
+			var v = (waveformData[a]*500);
+			if (Math.abs(v)>pos) trigger = true;
+			bitmap.lineTo(a*width,384+v);
+		}
+		bitmap.lineWidth = 2;
+		bitmap.strokeStyle = '#FFFFFF';
+		bitmap.stroke();
+		bitmap.closePath();
+	}
+	
+	document.getElementById("indicator").style.backgroundColor = trigger?"#FF0000":"#400000";
+	if (trigger!=lastWasTrigger) {
+		if (trigger) signalTrigger(true);
+		lastWasTrigger = trigger;
+	}
+	
+	var canvas = document.getElementById("spectrum");
+	var bitmap = canvas.getContext('2d');
+	
+	analyser.getByteFrequencyData(frequencyData);
+	bitmap.clearRect(0,0,1024,768);
+	var target = (frequencyData.length*0.835)|0;  // magic constant
+	var width = 1024/target;
+	for (var a=0; a<target; a++) {
+		bitmap.fillStyle="rgb("+parseInt(((target-a)*255)/target)+","+parseInt((a*255)/target)+",0)";
+		var x = a*width;
+		bitmap.fillRect(x,384-(frequencyData[a]),(width|0)+1,frequencyData[a]*2);
+	}
+	
+	requestAnimationFrame(renderFrame);
+}
+
+// Audio setup
+p.then(function(mediaStream) {
+	var source = audioCtx.createMediaStreamSource(mediaStream);
+	source.connect(analyser);	
+	
+	var scriptNode = audioCtx.createScriptProcessor(1024, 1, 1);
+	
+	scriptNode.onaudioprocess = function(audioProcessingEvent) {
+		var inputBuffer = audioProcessingEvent.inputBuffer;
+		waveformData = inputBuffer.getChannelData(0);
+	}
+	
+	source.connect(scriptNode);
+	scriptNode.connect(audioCtx.destination);
+	audioCtx.destination.disconnect();
+	renderFrame();
+});
+ 
+
+</script>
+</body></html>
